@@ -178,7 +178,16 @@
 // WARNING: anyone can read this key in the page source. See the notes in the chat.
 const GEMINI_API_KEY = "AQ.Ab8RN6IZjHdDUybwn_EKu9r3QHPQyqlOb63iGtHzjTRb_bOTsA";
 // Tried in order; if the first one is not available (404), the next one is used.
-const MODELS = ["gemini-3.8-flash", "gemini-flash-latest", "gemini-3.5-flash", "gemini-flash-lite-latest"];
+// Each route is tried in order, and inside it each model. The first route is the normal
+// Gemini API (AI Studio). The second is the Vertex AI "express mode" address, used only as a fallback.
+const ROUTES = [
+  { name: "studio",
+    url: m => `https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,
+    models: ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-flash-latest", "gemini-flash-lite-latest"] },
+  { name: "vertex",
+    url: m => `https://aiplatform.googleapis.com/v1/publishers/google/models/${m}:generateContent`,
+    models: ["gemini-2.5-flash", "gemini-2.5-flash-lite"] }
+];
 const SHOW_LOGO_TEXT = true;   // false = ring only, without "J.A.R.V.I.S." in the middle
 const SYSTEM_PROMPT =
   "You are JARVIS, a friendly and precise assistant. " +
@@ -295,30 +304,33 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const BUSY = [429, 500, 502, 503, 504];
 
 async function askGemini(key) {
-  let lastErr;
-  for (const m of MODELS) {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { return await callModel(m, key); }
-      catch (e) {
-        lastErr = e;
-        if (e.status === 404) break;               // model not available -> next model
-        if (!BUSY.includes(e.status)) throw e;     // key or other error -> stop
-        setStatus("RETRYING...");
-        if (attempt === 0) await sleep(1200);      // short pause, retry the same model once
+  let firstErr = null;
+  for (const route of ROUTES) {
+    for (const m of route.models) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try { return await callModel(route.url(m), key); }
+        catch (e) {
+          console.warn("[JARVIS]", route.name, m, e.status || "", e.message);
+          if (!firstErr) firstErr = e;
+          if (BUSY.includes(e.status)) {            // overloaded: wait, retry once, then next model
+            setStatus("RETRYING...");
+            if (attempt === 0) { await sleep(1200); continue; }
+          }
+          break;                                    // 401 / 403 / 404 / network: go to next model
+        }
       }
     }
   }
-  throw lastErr;
+  throw firstErr;
 }
 
 function friendlyError(e) {
-  if (e.status === 401 || e.status === 403) return "Սխալ՝ API key-ը չի ընդունվում։ " + e.message;
+  if (e.status === 401 || e.status === 403) return "Google-ը այս API key-ը չի ընդունում (401)։ Key-ը «AQ.» տիպի է և որոշ հաշիվների մոտ չի աշխատում։ Ստեղծիր նոր key՝ aistudio.google.com/apikey։\n\n" + e.message;
   if (BUSY.includes(e.status)) return "Gemini-ն հիմա ծանրաբեռնված է։ Փորձիր նորից մի քանի վայրկյան հետո։";
   return "Սխալ՝ " + e.message;
 }
 
-async function callModel(model, key) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+async function callModel(url, key) {
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-goog-api-key": key },
